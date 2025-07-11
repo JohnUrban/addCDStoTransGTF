@@ -1,0 +1,837 @@
+#!/bin/bash
+
+
+##############################################################################################################
+##############################################################################################################
+### CURRENT DEV VERSION
+##############################################################################################################
+##############################################################################################################
+
+## KNOWN ISSUES:
+## 1. Borf sometimes outputs 2 ORFs for the same transcript.
+##    --> The side effect is that only one of the ORFs ends up being used in the script, and I don't know which or how, and it may be wrong b/c of using the same name in arrays...
+##    --> This affected 13 out of 12586 transcripts in a test StringTie assembly.
+##.   --> Reasons: multiple.
+##.     --> multiple valid ORFs: Some times it is due to 2+ non-overlapping ORFs of same length both with valid start and stop codons. 
+##.          --> These are probably fusion transcripts that need to be broken up into separate transcripts.
+##.     --> multiple invalid ORFs: invalid due to alternative start or stop codons or both ;
+##.          --> There is not a clear way to choose between two invalid ORFs, especially overlapping ones... probably lncRNA, but can choose one at random, or report both...
+##.     --> mixture of valid and invalid -- not sure why it doesn't simply choose the valid one, but future versions of addCDStoTransGTF will handle this better.
+##.   addCDStoTransGTF handles this by selecting one ORF given a set of rules.
+##.   --> However, there is an instance of one protein not matching its extracted version at the end of the script, and I don't know why!!!
+##.   --> It should match. All others match. 
+
+## TO RUN ON MY MAC:
+## source ~/software/conda/source-conda-base.sh
+## conda activate addCDStoTransGTF-deps
+
+## NOTE: as it is, this script may be particular to the StringTie and PsiClass GTFs, or any GTF with similar gene_id/transcript_id naming conventions.
+##       It will not work with GTFs that do not have transcript_id = gene_id.k for k in 1-n, where n is number of transcripts per gene.
+
+
+## This script descends from ../old/old-pipeline-cleaned-up.sh.
+## It is designed to be even more generalized.
+## It is intended to simply take in entire transcriptome GTFs, and return a GTF with CDS added to the transcripts.
+
+
+## This script assumes the following:
+## 1. You have a GTF file with gene and transcript models, particularly from StringTie assemblies.
+## 2. You have a genome FASTA file that corresponds to the GTF.
+## 3. You have a file with the best models of genes across many samples, with nicknames and source file info.
+## 4. You have the necessary tools installed in your conda environment, such as:
+##    - awk, 
+##    - grep, 
+##    - gffread, 
+##    - faSize, 
+##    - borf, 
+##    - gff3sort.pl
+##    - fastaFormatter.py (from Sciara-Tools, which will be supplied with this script).
+##    - extractFastxEntries.py (from Sciara-Tools, which will be supplied with this script).
+##    - md5sum or md5sum-lite (for checking file integrity).
+## -> This can be done with a conda environment, such as `addCDStoTransGTF-deps`, which has all the necessary tools installed.
+## -> You can create this conda environment with the following command:
+##    conda create -n addCDStoTransGTF-deps python=3.10.4 bioconda::ucsc-fasize bioconda::borf bioconda::gffread bioconda::gff3sort -y
+## -> Or you can use the provided environment file `addCDStoTransGTF-deps.linux.yml` or `addCDStoTransGTF-deps.MacOS-M4max.yml` to create the environment.
+## -> Otherwise, you can install the necessary tools manually or however you prefer.
+
+
+
+###################################################################################
+## TODO: ##########################################################################
+###################################################################################
+
+##       Update the help function to reflect changes.
+##       Update the usage example in the help function to reflect this change.
+##       Update the script description to reflect this change.
+##       Generalize it to work with any gene_id format. 
+##.         Right now it assumes gene_id is in the format "gene_id" and "transcript_id" is in the format gene_id.k 
+##               for k in 1-n, where n is number of transctipts per gene.
+##          Example gene_id: "STRG.10313" or "scaffold_1.54"
+##          Example transcript_id: "STRG.10313.1" or "scaffold_1.54.1"
+
+
+
+## Perhaps TODO:
+## Make a utility that can preserve the parts of making a subGTF.
+
+###################################################################################
+## HELP SECTION ###################################################################
+###################################################################################
+
+function what_it_does {
+    echo -e "\tWhat addCDStoTransGTF does:"
+    echo -e "\t\tThis script starts by extracting transcript sequences from the genome given the provided transcriptome GTF file."
+    echo -e "\t\tIt then chooses the best ORF from the stranded transcript sequences using Borf."
+    echo -e "\t\tThe corresponding protein and coding sequences are provided in FASTA files."
+    echo -e "\t\tIt then maps the ORF (i.e. the Coding Sequence or CDS) coordinates from the transcript to the genome."
+    echo -e "\t\tUltimately, the final product is the CDS-annotated transcriptome GTF that works with the provided genome FASTA file.\n"
+}
+
+function what_next {
+    echo -e "\tWhat to do next:"
+    echo -e "\t\tThe CDS-annotated transcriptome GTF can be used visualization in genome browsers (e.g. IGV) or for further analysis."
+    echo -e "\t\tThe CDS-annotated transcriptome GTF can be used to extract transcript, CDS, and protein sequences from the genome sequence."
+    echo -e "\t\tThe learned protein sequences can be used for further functional annotation or analysis.\n"
+}
+
+function why_use_it {
+    echo -e "\tWhy use addCDStoTransGTF:"
+    echo -e "\t\tAlthough addCDStoTransGTF does not replace more sophisticated annotation pipelines, it provides a quick way to predict protein sequences and add CDS information to transcriptome GTFs."
+    echo -e "\t\taddCDStoTransGTF is a good starting point for many analyses, especially when high-quality genome annotations are not available."
+    echo -e "\t\tSo long as the transcriptome GTF is of high quality, the predicted CDS and proteins are usually of high quality as well."
+    echo -e "\t\tThis \"annotation\" approach is simple and makes no assumptions about genes present other than what is in the user's transcriptome assembly to be analyzed."
+    echo -e "\t\tThe CDS-annotated transcriptome GTF can be used for downstream analyses, such as differential expression analysis, functional annotation, or comparative genomics.\n"
+    
+    echo -e "\t\taddCDStoTransGTF is particularly useful for non-model organisms where gene models are not well established, although it has some perks even for model organisms."
+    echo -e "\t\tA strength is that, for downstream analyses such as differential expression, using the transcriptome GTF leaves both coding and non-coding genes as substrates for analysis."
+    echo -e "\t\tThis is in contrast to genome annotation pipelines that often only focus on protein-coding genes."
+    echo -e "\t\tAlthough, some non-coding RNAs will be assigned ORFs that may not be biologically relevant (false positives), other pipelines often suffer from the opposite problem (false negatives)."
+    echo -e "\t\tCommon annotation pipelines often use an arbitrary thumb-rule, such as having no ORF longer than a minimum protein length parameter, to classify a transcript as non-coding."
+    echo -e "\t\tHowever, many transcripts classified as lncRNAs in public datasets have valid ORFs and real proteins (e.g. with signal peptides and other known motifs)."
+    echo -e "\t\tThus, by predicting the best ORF for transcripts that might otherwise be classified as lncRNA, addCDStoTransGTF offers higher sensitivity to normally-ignored ORFs."
+    echo -e "\t\tThis allows the user to further characterize and filter predicted proteins with more sophisticated measures (e.g. motif, domain, and functional analyses)."
+    echo -e "\t\tIt also allows the user to enforce a minimum protein length rule further down the analysis chain if desired.\n"
+}
+
+function help {
+  if [ $# -eq 0 ]; then
+    echo -e "\n\tUsage: $0 <gtf_file> <min_valid_orf_length> <genome_fasta>\n"
+    echo -e "\t\t<gtf_file>:\t\tThis is an input GTF file of a transcriptome from StringTie, PsiClass, or other."
+    echo -e "\t\t\t\t\tIt assumes column 3 contains the feature type (e.g. 'transcript' and 'exon')."
+    echo -e "\t\t\t\t\tIt assumes there are gene_id, transcript_id, and exon_number attributes.\n"
+    echo -e "\t\t<min_valid_orf_length>:\tMinimum valid ORF length (in AA) for Borf to consider an ORF as valid."
+    echo -e "\t\t\t\t\tRecommendation is 20-40 AA, 75 highest."
+    echo -e "\t\t\t\t\t - Higher values give fewer false positive ORFs, but more false negatives."
+    echo -e "\t\t\t\t\t - Shorter values give more false positive ORFs, but fewer false negatives."
+    echo -e "\t\t\t\t\t - Using shorter values here still permits longer cutoffs to be used in downstream analyses,"
+    echo -e "\t\t\t\t\t     with the advantage of allowing discovery of true short proteins using more sophisticated filtering methods (motifs, domains, etc).\n"
+    echo -e "\t\t<genome_fasta>:\t\tThe genome FASTA file that corresponds to the GTF.\n"
+
+    echo -e "\tExample Usage: \n\t\t$0 my-transcriptome.gtf 40 my-genome.fasta\n"
+
+    echo -e "\tGTF Support:"
+    echo -e "\t\taddCDStoTransGTF supports any transcriptome GTF where transcript_id = gene_id.k where k is the transcript number."
+    echo -e "\t\tFor example, it supports StringTie and PsiClass transcriptome GTFs. \n"
+
+    what_it_does
+
+    what_next
+
+    why_use_it
+
+    echo -e "\tDependencies:"
+    echo -e "\t\tThis script is designed to be run in a conda environment with the necessary tools installed, such as gffread, faSize, borf, and gff3sort.pl."
+    echo -e "\t\tIt also expects fastaFormatter.py and extractFastxEntries.py (supplied with this program)."
+    echo -e "\t\tIt also expects common utilities such as awk, grep, and md5sum or md5sum-lite to be installed in the PATH."
+    echo -e "\t\tIf needed, make sure to activate the appropriate conda environment before running the script.\n"
+    echo -e "\t\tFor example, you can install the necessary tools in a conda environment named 'addCDStoTransGTF-deps' with the following command:"
+    echo -e "\t\t\tconda create -n addCDStoTransGTF-deps python=3.10.4 bioconda::ucsc-fasize bioconda::borf bioconda::gffread bioconda::gff3sort -y \n"
+    echo -e "\t\tThen run:\n\t\t\tconda activate addCDStoTransGTF-deps\n"
+    echo -e "\t\tThere are also YML files for conda environments provided for Linux and MacOS, named addCDStoTransGTF-deps.linux.yml and addCDStoTransGTF-deps.MacOS-M4max.yml, respectively.\n"
+    echo -e "\t\tTo install the conda environment from the YML file, use the following command:"
+    echo -e "\t\t\tconda env create -f addCDStoTransGTF-deps.linux.yml"
+    echo -e "\n\t\tThen run:\n\t\t\tconda activate addCDStoTransGTF-deps\n"
+
+    exit 1
+  fi
+}
+
+help "$@"
+
+
+## Check if the necessary tools are installed
+## This will check for the presence of md5sum or md5sum-lite.
+if command -v md5sum &> /dev/null ; then 
+  MD5SUM=md5sum ; 
+elif command -v md5sum-lite &> /dev/null ; then 
+  MD5SUM=md5sum-lite ; 
+else 
+  echo "md5sum and md5sum-lite are not installed."; exit 1 ; 
+fi
+
+## This will check for the presence of awk, grep, gffread, faSize, borf, gff3sort.pl, extractFastxEntries.py, and fastaFormatter.py.
+for tool in awk grep gffread faSize borf gff3sort.pl extractFastxEntries.py fastaFormatter.py  ${MD5SUM}; do
+  if ! command -v ${tool} &> /dev/null; then
+    echo -e "\tError: ${tool} is not installed or not in the PATH."
+    echo -e "\tPlease install ${tool} and try again."
+    exit 1
+  else
+    echo -e "\t${tool} is installed: $(command -v ${tool})"
+  fi
+done
+echo
+
+###################################################################################
+## GIVEN VARIABLES SECTION ########################################################
+###################################################################################
+
+## GTF is the GTF file that contains the gene and transcript models.
+## This is either already made or will be made by the createSubGTF function.
+GTF=${1} ## IV-12A-gene-transcript-models.gtf
+
+## Minimum valid ORF length (in AA) for Borf to consider an ORF as valid.
+## 40 was original default; 
+## 20-21 is expected at random in genome, but probability it is real given it is a transcript may be higher than just on the genome seq.
+## Shortest proteins known are 11-16 AA; shortest on RefSeq is 44 AA according to Google.
+MIN_VALID_ORF_LENGTH=${2} ## 40
+
+## GENOME_FA is the genome FASTA file that corresponds to the GTF.
+GENOME_FA=${3} 
+
+###################################################################################
+## AUTOMATED VARIABLES SECTION ####################################################
+###################################################################################
+
+## BASE is the base name of the GTF file without the .gtf extension.
+BASE=$( basename ${GTF} .gtf )
+INTDIR=intermediate_files ## This is the directory where the supplemental files will be stored.
+mkdir -p ${INTDIR} ## Create the intermediate files directory if it does not exist.
+BASEDIR=${INTDIR}/${BASE} ## This is the base directory where the intermediate files will be stored.
+TRANS_FA=${BASEDIR}.transcripts.fasta ## This is the transcript FASTA file that will be created from the GTF.
+GFF=${BASEDIR}.gff ## This is the GFF file that will be created from the GTF.
+
+for VAR in GTF MIN_VALID_ORF_LENGTH GENOME_FA BASE BASEDIR TRANS_FA; do
+  echo -e "\t${VAR}:\t${!VAR}"
+done; echo
+
+###################################################################################
+## FUNCTIONS SECTION ##############################################################
+###################################################################################
+function processBorfOutput {
+  ## This function processes the Borf output and selects the best ORF for each transcript with
+  awk 'NR>1 {print $1}' ${BASEDIR}.transcripts.txt | sort | uniq -d > ${BASEDIR}.borf-multiple-ORFs.txt
+  awk 'NR>1 {print $1}' ${BASEDIR}.transcripts.txt | sort | uniq > ${BASEDIR}.borf-all-ORFs.txt
+  nMultiORFs=$(awk 'END{print NR}' ${BASEDIR}.borf-multiple-ORFs.txt)
+  if [ -s ${BASEDIR}.borf-multiple-ORFs.txt ]; then
+    echo -e "\nBorf found ${nMultiORFs} transcripts with multiple ORFs."
+    echo -e "\tPlease check the file ${BASEDIR}.borf-multiple-ORFs.txt for which transcripts."
+    echo -e "\tMultiple ORFs may be due to fusion transcripts, alternative start/stop codons, by chance since two ORFs look equally good, and so on."
+    echo -e "\tSince this may cause issues with the GTF, only one will be used in the script, and the rest will be ignored.\n"
+    ## ${BASEDIR}.transcripts.txt is the Borf output table with the ORF information.
+    ## It has the following columns:
+    ## 1. orf_id
+    ## 2. transcript_id
+    ## 3. frame
+    ## 4. strand
+    ## 5. seq_length_nt
+    ## 6. start_site_nt
+    ## 7. stop_site_nt
+    ## 8. utr3_length_nt
+    ## 9. start_site_aa
+    ## 10. stop_site_aa
+    ## 11. orf_length_aa
+    ## 12. first_aa_MET
+    ## 13. final_aa_stop
+    ## 14. orf_class
+    ## This next bit of code will go through each transcript with multiple ORFs and select the best one.
+    ## If one has orf_class "complete" and the other(s) do not, it will select the "complete" one.
+    ## If both (or all) have orf_class "complete", it will select the first one.
+    ## If none have orf_class "complete", if one (or more) has orf_class "incomplete_5prime" or "incomplete_3prime" and the other(s) have orf_class "incomplete", it will select the first one with "incomplete_5prime" or "incomplete_3prime".
+    ## If all have orf_class "incomplete", it will select the first one.
+    ## Else it will select the first one.
+    ## In each case it will report the selected ORF line to the console with an additional field that says why and/or how it was selected.
+    echo -e "Selecting the best ORF for each transcript with multiple ORFs."
+    while read -r multiorf ; do
+      grep -w "${multiorf}" ${BASEDIR}.transcripts.txt | \
+      awk -F'\t' '
+        BEGIN {
+          best_idx = -1
+          best_type = ""
+          n = 0
+        }
+        {
+          n++
+          orf_class[n] = $14
+          line[n] = $0
+        }
+        END {
+          # Rule 1: Only complete ORF
+          complete_count = 0
+          for (i=1; i<=n; i++) {
+            if (orf_class[i] == "complete") {
+              complete_count++
+            }
+          }
+          if (complete_count == 1) {
+            for (i=1; i<=n; i++) {
+              if (orf_class[i] == "complete") {
+                print line[i] "\tOnly complete ORF"
+                exit
+              }
+            }
+          }
+          # Rule 2: First complete ORF
+          if (complete_count > 1) {
+            for (i=1; i<=n; i++) {
+              if (orf_class[i] == "complete") {
+                print line[i] "\tFirst complete ORF"
+                exit
+              }
+            }
+          }
+          # Rule 3: First partially complete ORF
+          for (i=1; i<=n; i++) {
+            if (orf_class[i] == "incomplete_5prime" || orf_class[i] == "incomplete_3prime") {
+              print line[i] "\tFirst partially complete ORF"
+              exit
+            }
+          }
+          # Rule 4: First incomplete ORF
+          for (i=1; i<=n; i++) {
+            if (orf_class[i] == "incomplete") {
+              print line[i] "\tFirst incomplete ORF"
+              exit
+            }
+          }
+          # Fallback: print first line
+          print line[1] "\tFirst ORF"
+        }
+      '
+    done < ${BASEDIR}.borf-multiple-ORFs.txt > ${BASEDIR}.transcripts.selected-from-multiORFs.txt
+
+    ## Grab the single ORFs from the Borf output.
+    awk 'NR>1' ${BASEDIR}.transcripts.txt | grep -v -w -f ${BASEDIR}.borf-multiple-ORFs.txt | awk 'BEGIN{OFS="\t"} {print $0,"Single Best ORF"}' > ${BASEDIR}.transcripts.singleORF.txt
+    
+    ## Combine the results
+    ( head -n 1 ${BASEDIR}.transcripts.txt | awk 'BEGIN{OFS="\t"} {print $0,"selection_reason"}' ;
+      cat ${BASEDIR}.transcripts.selected-from-multiORFs.txt ${BASEDIR}.transcripts.singleORF.txt | sort 
+    ) > ${BASEDIR}.transcripts.selected.txt
+
+    ## Create a Protein FASTA file with the selected transcripts from the pep file output by Borf.
+    awk 'NR>1 {sub(">",""); print $1}' ${BASEDIR}.transcripts.selected.txt > ${BASEDIR}.transcripts.selected.ids.txt
+    extractFastxEntries.py -n ${BASEDIR}.transcripts.selected.ids.txt -f ${BASEDIR}.transcripts.pep | fastaToTable.py -f - | awk '{sub(/\.orf[0-9]/,""); print ">"$1"\n"$2}' > ${BASEDIR}.peptides.fasta 
+
+    ## Change name of original to name.original and name of new file to the original name. This is to keep downstream processes happy.
+    mv ${BASEDIR}.transcripts.txt ${BASEDIR}.transcripts.original.txt
+    mv ${BASEDIR}.transcripts.selected.txt ${BASEDIR}.transcripts.txt
+  else
+    echo -e "\nBorf did not find any transcripts with multiple ORFs."
+    echo -e "\t This is a happy result that means no special processing needs to be done.\n"
+    ## Rename the output pep file from Borf.
+    echo -e "Renaming Borf output pep file."
+    fastaToTable.py -f ${BASEDIR}.transcripts.pep | awk '{sub(/\.orf[0-9]/,""); print ">"$1"\n"$2}' > ${BASEDIR}.peptides.fasta 
+    #mv ${BASEDIR}.transcripts.pep ${BASEDIR}.peptides.fasta 
+  fi
+
+  ## Optionally remove original Borf pep file.
+  #rm ${BASEDIR}.transcripts.pep
+}
+
+
+function exonsFromGenomeToTranscript {
+    # The input is:
+    # BED file for exons of a gene on the genome.
+    # Input BED columns are: chr, start, end, gene name, exon number, strand
+    # Example input line:
+    # IV	59048440	59048532	STRG.10313	1	+
+
+    # The output is:
+    # BED file for exons of a gene on the transcript.
+    # This will be used to map CDS to exons on the transcript.
+    # For genes on the either strand, this will be done by subtracting the start of the gene from the start and end of each exon.
+
+
+    # Input:
+    EXON_BED=${1}  ## Exon BED file on the genome
+
+    # Execute:
+    awk '
+    {
+        gene = $4
+        strand = $6
+        if (!(gene in min_start) || $2 < min_start[gene]) {
+            min_start[gene] = $2
+        }
+        if (!(gene in exon_count)) {
+            exon_count[gene] = 0
+            gene_strand[gene] = strand
+        }
+        exon_count[gene]++
+        exon_starts[gene, exon_count[gene]] = $2
+        exon_ends[gene, exon_count[gene]] = $3
+        exon_lines[gene, exon_count[gene]] = $0
+        exon_max[gene] = exon_count[gene]
+    }
+    END {
+        for (gene in min_start) {
+            strand = gene_strand[gene]
+            offset = 0
+            for (i = 1; i <= exon_max[gene]; i++) {
+                split(exon_lines[gene, i], fields, "\t")
+                new_start = fields[2] - min_start[gene] - offset
+                new_end   = fields[3] - min_start[gene] - offset
+                exon_new_starts[gene, i] = new_start
+                exon_new_ends[gene, i] = new_end
+                # Keep original exon number (fields[5])
+                exon_fields[gene, i] = fields[1] "\t" new_start "\t" new_end "\t" fields[4] "\t" fields[5] "\t" fields[6] "\t" fields[2] "\t" fields[3]
+                # Prepare offset for next exon
+                if (i < exon_max[gene]) {
+                    gap = exon_starts[gene, i+1] - exon_ends[gene, i]
+                    if (gap > 0) {
+                        offset += gap
+                    }
+                }
+            }
+            if (strand == "+") {
+                for (i = 1; i <= exon_max[gene]; i++) {
+                    print exon_fields[gene, i]
+                }
+            } else if (strand == "-") {
+                # Find max end value
+                max_end = exon_new_ends[gene, 1]
+                for (i = 2; i <= exon_max[gene]; i++) {
+                    if (exon_new_ends[gene, i] > max_end) {
+                        max_end = exon_new_ends[gene, i]
+                    }
+                }
+                # Process and print in reverse order
+                for (i = exon_max[gene]; i >= 1; i--) {
+                    s = exon_new_starts[gene, i]
+                    e = exon_new_ends[gene, i]
+                    # Subtract from max_end and multiply by -1
+                    new_s = (s - max_end) * -1
+                    new_e = (e - max_end) * -1
+                    # Swap for output: use new_e as start, new_s as end
+                    split(exon_lines[gene, i], fields, "\t")
+                    # Keep original exon number (fields[5])
+                    print fields[1], new_e, new_s, fields[4], fields[5], fields[6], fields[2], fields[3]
+                }
+            }
+        }
+    }
+    ' OFS='\t' "${EXON_BED}"
+
+}
+
+function mapCDSFromTranscriptToGenome {
+    # The input is:
+    # BED-like file for CDS and exons of a gene on its transcript sequence.
+    # This is called ${BASE}.overlap-db2.bed in the addCDStoTranscript.sh script.
+    # Input BED columns are: seq_name, CDS transcript start, CDS transcript end, chr, exon number, genome strand, genome start, genome end, CDS-Exon overlap length, exon transcript start, exon transcript end
+    # Example input lines:
+    # STRG.10313.1	41	92	IV	1	+	59048440	59048532	51	0	92
+    # STRG.10313.1	92	260	IV	2	+	59048590	59048841	168	92	343
+    # STRG.10314.1	41	92	IV	2	-	59052259	59052351	51	0	92
+    # STRG.10314.1	92	260	IV	1	-	59051946	59052199	168	92	345
+
+    # The output is:
+    # BED file for CDS exons of a transcript on the genome.
+    # This will be used to add the CDS to the transcript GTF file.
+    # Example output lines:
+    # IV	59048481	59048532	STRG.10313.1	1	+
+    # IV	59048590	59048758	STRG.10313.1	2	+
+    # IV	59052031	59052199	STRG.10314.1	1	-
+    # IV	59052259	59052310	STRG.10314.1	2	-
+
+    ## This still needs to handle negative strand genes, which will have the genome start and end coordinates flipped.
+
+    # Input:
+    OVL_DB2_BED=${1}  ## Exon BED file on the genome
+
+    # Execute:
+    awk '{
+        # Input columns:
+        # 1: seq_name
+        # 2: CDS transcript start
+        # 3: CDS transcript end
+        # 4: chr
+        # 5: exon number
+        # 6: genome strand
+        # 7: genome start
+        # 8: genome end
+        # 9: CDS-Exon overlap length
+        # 10: exon transcript start
+        # 11: exon transcript end
+
+        cds_start = $2
+        cds_end = $3
+        chr = $4
+        exon_num = $5
+        strand = $6
+        genome_start = $7
+        genome_end = $8
+        exon_tx_start = $10
+        exon_tx_end = $11
+
+        if (strand == "+") {
+            # Positive strand logic (unchanged)
+            if (cds_start > exon_tx_start) {
+                genome_start = genome_start + (cds_start - exon_tx_start)
+            }
+            if (cds_end < exon_tx_end) {
+                genome_end = genome_end - (exon_tx_end - cds_end)
+            }
+        } else if (strand == "-") {
+            # Negative strand logic (adjust as requested)
+            if (cds_start > exon_tx_start) {
+                genome_end = genome_end - (cds_start - exon_tx_start)
+            }
+            if (cds_end < exon_tx_end) {
+                genome_start = genome_start + (exon_tx_end - cds_end)
+            }
+        }
+
+        # Output: chr, genome_start, genome_end, seq_name, exon_num, strand
+        print chr "\t" genome_start "\t" genome_end "\t" $1 "\t" exon_num "\t" strand
+    }' "${OVL_DB2_BED}"
+}
+
+
+
+
+
+###################################################################################
+## EXECUTION SECTION ##############################################################
+###################################################################################
+
+
+
+## GIVEN A TRANSCRIPTOME ASM, EXTRACT TRANSCRIPT SEQS, LEARN PROTEIN SEQS.... AND ADD CDS to transcript GTF.....
+##########################################
+
+
+## Brief disclaimer on what is about to happen
+what_it_does
+why_use_it
+
+## Converting GTF to GFF3 format.
+echo -e "\nConverting GTF to GFF3 format.\n\tThis is provided for convenience, and for now is used in redundant processing to ensure consistent results."
+gffread ${GTF} > ${GFF}
+
+
+## Extract Transcripts from GTF with gffread.
+echo -e "\nExtract Transcripts : with gffread using ${TRANS_FA} and ${GTF} using gffread."
+## Using either GTF or GFF works here.
+gffread ${GTF} -g ${GENOME_FA} -w ${TRANS_FA} > gffread.transcript.err 2>&1
+#gffread ${GFF} -g ${GENOME_FA} -w ${TRANS_FA} > gffread.transcript.err 2>&1
+
+echo -e "\nReformatting Transcripts"
+## format transcript fasta to be 1 line per seq
+TMPTRANS_FA=${BASEDIR}.tmp.${RANDOM}.trans.fa
+fastaFormatter.py -f ${TRANS_FA} > ${TMPTRANS_FA} && mv ${TMPTRANS_FA} ${TRANS_FA}
+
+
+## Get transcript lengths
+## This will create a file with the lengths of each transcript in the FASTA.
+## No longer needed, but keeping for supplemental intermediate files.
+echo -e "\nGetting Transcript Lengths"
+faSize -detailed ${TRANS_FA} > ${BASEDIR}.transcript.lengths.txt
+
+
+
+## Extract the best ORF from the stranded transcript sequences using Borf.
+## This will create a file with the best ORF sequences and a text file with the ORF information.
+echo "Running Borf"
+## Best ORF from stranded transcript seqs
+borf --force_overwrite -l ${MIN_VALID_ORF_LENGTH} ${TRANS_FA} > ${BASEDIR}.borf.err 2>&1
+
+## Check Borf output for transcripts with multiple ORFs. Process if needed.
+echo -e "\nChecking Borf output for transcripts with multiple ORFs (rare, but may need to be handled)."
+processBorfOutput
+
+
+## Get the lengths of the peptides from the Borf output.
+echo "Getting Peptide Lengths"
+faSize -detailed ${BASEDIR}.peptides.fasta > ${BASEDIR}.peptides.lengths.txt
+
+
+
+## Extract the Borf CDS sequences from the transcript FASTA.
+echo -e "\nExtracting Borf CDS"
+## Coding sequence location BED file
+echo -e "First, creating a BED file with the CDS locations on the transcripts."
+awk 'BEGIN{FS="\t" ; OFS="\t"}{if (NR>1) print $2,$6-1,$7}' ${BASEDIR}.transcripts.txt > ${BASEDIR}.CDS-on-transcript.bed
+echo -e "Now, extracting the CDS sequences from the transcript FASTA using the BED file."
+extractFastxEntries.py -B ${BASEDIR}.CDS-on-transcript.bed -f ${TRANS_FA} > ${BASEDIR}.Borf-CDS.fasta ## | fasta_name_changer.py -f -
+## Could replace w/ BEDtools, which is faster.
+#bedtools getfasta -fi ${TRANS_FA} -bed ${BASEDIR}.CDS-on-transcript.bed | fastaFormatter.py -f - > ${BASEDIR}.Borf-CDS.fasta
+#rm ${TRANS_FA}.fai
+
+
+## Get the lengths of the Borf CDS sequences.
+echo -e "\nGetting CDS Lengths"
+faSize -detailed ${BASEDIR}.Borf-CDS.fasta > ${BASEDIR}.CDS.lengths.txt
+
+
+## Extract the gene body and exon regions from the renamed GTF.
+echo -e "\nExtracting Transcript Body BED"
+## This is no longer needed. Can Delete.
+# IV      StringTie       transcript      59048441        59048841        1000    +       .       gene_id "STRG.10313"; transcript_id "STRG.10313.1";
+# scaffold_1      PsiCLASS        transcript      32582   41180   1000    -       .       gene_id "scaffold_1.54"; transcript_id "scaffold_1.54.0"; FPKM "0.199033"; TPM "0.409969"; cov "7.792208"; sample_cnt "1";
+awk '$3=="transcript" {OFS="\t" ; 
+                      match($0, /transcript_id "[^"]+"/); 
+                      tid=substr($0, RSTART+15, RLENGTH-16); 
+                      print $1,$4-1,$5,tid,".",$7}' ${GTF} > ${BASEDIR}.transcript-regions.bed
+
+
+## Extract the exon regions from the renamed GTF.
+echo -e "\nExtracting Exon BED"
+#awk '$3=="exon" {OFS="\t" ; gsub(/"|;/,""); print $1,$4-1,$5,$10, $14,$7}' ${EXON_FIX_GTF} > ${BASE}.exons.bed
+awk '$3=="exon" {OFS="\t" ; 
+                      match($0, /transcript_id "[^"]+"/); 
+                      tid=substr($0, RSTART+15, RLENGTH-16); 
+                      match($0, /exon_number "[^"]+"/); 
+                      exon_num=substr($0, RSTART+13, RLENGTH-14);
+                      print $1,$4-1,$5,tid,exon_num,$7}' ${GTF} > ${BASEDIR}.exons.bed
+
+
+## Map exons onto transcripts while preserving genome information to help with CDS processing.
+exonsFromGenomeToTranscript ${BASEDIR}.exons.bed | awk 'OFS="\t" {print $4,$2,$3,$1,$5,$6,$7,$8}' > ${BASEDIR}.exons-on-transcripts.bed
+
+## Overlap database #1 of exons on transcripts with CDS on transcripts.
+## This has the full CDS interval and matching exon intervals.
+intersectBed -wo -a ${BASEDIR}.CDS-on-transcript.bed -b ${BASEDIR}.exons-on-transcripts.bed > ${BASEDIR}.overlap-db1.bed
+
+## Overlap database #2 of exons on transcripts with gene regions on transcripts.
+## This has CDS-exon intervals in addition to matching exon intervals.
+awk 'OFS="\t" { start=$5; 
+                end=$6 ; 
+                if($2>=$5){start=$2} ; 
+                if($3<$6){end=$3} ; 
+                print $1,start,end,$7,$8,$9,$10,$11,$12,$5,$6
+}' ${BASEDIR}.overlap-db1.bed > ${BASEDIR}.overlap-db2.bed
+##
+
+
+
+## Map CDS from transcript to genome.
+mapCDSFromTranscriptToGenome ${BASEDIR}.overlap-db2.bed > ${BASEDIR}.CDS-on-genome.bed
+
+
+## Create a GTF file with the CDS information.
+## Example input line: IV	59048481	59048532	STRG.10313.1	1	+
+echo -e "\nCreating GTF with CDS information."
+awk 'BEGIN{FS="\t" ; OFS="\t"}{
+      seqname = $1
+      source = "addCDSToTransGTF"
+      feature = "CDS"
+      start = $2+1
+      end = $3
+      score = 1000
+      strand = $6
+      frame = 0
+      transcript_id = $4
+      split($4, arr, ".")
+      gene_id = arr[1]
+      for(i=2; i < length(arr); i++) {
+        gene_id = gene_id "." arr[i]
+      }
+      exon_number = $5
+      attributes = "gene_id \""gene_id"\"; transcript_id \""transcript_id"\"; exon_number \""exon_number"\";"
+      print seqname, source, feature, start, end, score, strand, frame, attributes
+}' ${BASEDIR}.CDS-on-genome.bed > ${BASEDIR}.CDS.gtf
+
+
+
+## Add CDS to the renamed GTF, in new file.
+echo -e "\nAdding CDS to the renamed GTF, in new file."
+cat ${GTF} ${BASEDIR}.CDS.gtf > ${BASEDIR}.CDS-and-all.gtf
+## Adding a header at this step and/or below steps is causing problems at the moment, so not doing it.
+#HEADER="# addCDStoTransGTF script output $( date )\n# $( echo ${0} ${@} )\n# This GTF file contains the original transcriptome GTF with added CDS information.\n# The CDS information is added as a new feature type 'CDS' with gene_id and transcript_id attributes.\n# Original transcriptome assembly command below (if it was in original GTF header)."
+#( echo -e $HEADER ; cat ${GTF} ${BASEDIR}.CDS.gtf ) > ${BASEDIR}.CDS-and-all.gtf
+# ( echo "## addCDStoTransGTF script output $( date )" ;
+#   echo "## $( echo ${0} ${@} )" ; 
+#   echo "## This GTF file contains the original transcriptome GTF with added CDS information." ;
+#   echo "## The CDS information is added as a new feature type 'CDS' with gene_id, transcript_id, and exon_number attributes." ;
+#   echo "## Original transcriptome assembly command below (if it was in original GTF header)." ; 
+#   cat ${GTF} ${BASEDIR}.CDS.gtf ) > ${BASEDIR}.CDS-and-all.gtf
+
+
+## Can convert to GFF here if needed.
+#gffread ${BASEDIR}.CDS-and-all.gtf > ${BASEDIR}.CDS-and-all.gff
+
+
+## Sort the GTF file with gff3sort.pl
+echo -e "\nSorting the GTF file with gff3sort.pl"
+## Method w/o header:
+# gff3sort.pl --precise ${BASEDIR}.CDS-and-all.gtf > ${BASE}.WITH-CDS.gtf
+## Method with header:
+HEADER="# addCDStoTransGTF script output $( date )\n# $( echo ${0} ${@} )\n# This GTF file contains the original transcriptome GTF with added CDS information.\n# The CDS information is added as a new feature type 'CDS' with gene_id and transcript_id attributes.\n# Original transcriptome assembly command below (if it was in original GTF header)."
+( echo -e $HEADER ; gff3sort.pl --precise ${BASEDIR}.CDS-and-all.gtf ) > ${BASE}.WITH-CDS.gtf
+
+
+# If gff processing also going on, do this:
+# gff3sort.pl --precise ${BASEDIR}.CDS-and-all.gff > ${BASE}.WITH-CDS.gff
+
+
+## Clean up intermediate files
+echo -e "\nCleaning up some intermediate CDS GTFs"
+#rm ${BASEDIR}.CDS-and-all.g*f
+#rm ${BASEDIR}.CDS.g*f
+#echo -e "Not deleting CDS.gtf in this dev version, but you can delete them if you want."
+
+## Extract CDS from the genome FASTA to compare to Borf CDS sequences.
+echo -e "\nExtract CDS from genome to compare to Borf CDS sequences."
+# compare extracted CDS to know CDS
+echo -e "\nExtracting CDS and Protein from genome FASTA using gffread with CDS-updated GTF file."
+# echo "gffread ${BASE}.WITH-CDS.gtf -g ${GENOME_FA} -x ${BASEDIR}.extracted-CDS-only.fasta"
+gffread ${BASE}.WITH-CDS.gtf -g ${GENOME_FA} -x ${BASEDIR}.extracted-CDS-only.fasta
+gffread ${BASE}.WITH-CDS.gtf -g ${GENOME_FA} -y ${BASEDIR}.extracted-protein-only.fasta
+
+# If gff processing also going on, optionally do this:
+# echo "gffread ${BASE}.WITH-CDS.gff -g ${GENOME_FA} -x ${BASEDIR}.extracted-CDS-only.gff.fasta"
+# gffread ${BASE}.WITH-CDS.gff -g ${GENOME_FA} -x ${BASEDIR}.extracted-CDS-only.gff.fasta ##2> gffread.gff-extracted-CDS.err
+
+## Reformat
+echo -e "Reformatting extracted CDS and Protein FASTAs to be 1 line per seq."
+TMPCDS_FA=tmp.${RANDOM}.cds.fa
+## Reformat the extracted CDS FASTA to be 1 line per seq.
+fastaFormatter.py -f ${BASEDIR}.extracted-CDS-only.fasta > ${TMPCDS_FA} && mv ${TMPCDS_FA} ${BASEDIR}.extracted-CDS-only.fasta
+## Reformat the extracted Protein FASTA to be 1 line per seq.
+TMPPEP_FA=tmp.${RANDOM}.pep.fa
+fastaFormatter.py -f ${BASEDIR}.extracted-protein-only.fasta > ${TMPPEP_FA} && mv ${TMPPEP_FA} ${BASEDIR}.extracted-protein-only.fasta
+
+# Check md5sum of Borf CDS and extracted CDS to see if they match.
+echo -e "\nChecking md5sum of Borf CDS and extracted CDS to see if they match."
+A=$( grep -v ">" ${BASEDIR}.Borf-CDS.fasta | sort | ${MD5SUM} | awk '{print $1}' )
+B=$( grep -v ">" ${BASEDIR}.extracted-CDS-only.fasta | sort | ${MD5SUM} | awk '{print $1}' )
+if [ "${A}" == "${B}" ] ; then
+  echo -e "\tCDS are identical from original BORF coordinates on transcripts and when using new CDS coordinates on the genome sequence.\n"
+else
+  echo -e "\tCDS sequences are NOT identical from original BORF coordinates on transcripts and when using new CDS coordinates on the genome sequence."
+  echo -e "\tThis is unusual, and may indicate a problem with the Borf output or the extraction process."
+  echo -e "\tThe number of different CDS sequences is:\t$( diff <( grep -v ">" ${BASEDIR}.Borf-CDS.fasta | sort ) <( grep -v ">" ${BASEDIR}.extracted-CDS-only.fasta | sort )  | grep -c -E ">" )"
+  echo -e "\tPlease check the files ${BASEDIR}.Borf-CDS.fasta and ${BASEDIR}.extracted-CDS-only.fasta for differences."
+fi
+
+
+# Check md5sum of Borf Protein and extracted Protein to see if they match.
+echo -e "\nChecking md5sum of Borf Protein and extracted Protein to see if they match."
+A=$( grep -v ">" ${BASEDIR}.peptides.fasta | sort | ${MD5SUM} | awk '{print $1}' )
+B=$( grep -v ">" ${BASEDIR}.extracted-protein-only.fasta | sort | ${MD5SUM} | awk '{print $1}' )
+if [ "${A}" == "${B}" ] ; then
+  echo -e "\tProtein sequences are identical from original BORF coordinates on transcripts and when using new CDS coordinates on the genome sequence.\n"
+else
+  echo -e "\tProtein sequences are NOT identical from original BORF coordinates on transcripts and when using new CDS coordinates on the genome sequence."
+  echo -e "\tThis is unusual, and may indicate a problem with the Borf output or the extraction process."
+  echo -e "\tThe number of different Protein sequences is:\t$( diff <( grep -v ">" ${BASEDIR}.peptides.fasta | sort ) <( grep -v ">" ${BASEDIR}.extracted-protein-only.fasta | sort )  | grep -c -E ">" )"
+  echo -e "\tPlease check the files ${BASEDIR}.peptides.fasta and ${BASEDIR}.extracted-protein-only.fasta for differences."
+  echo -e "\tSometimes there is a discrepancy between the Borf Protein and extracted Protein sequences."
+  echo -e "\tIt is usually (or only ever) a problem with one or a few of the transcripts that had multiple ORFs."
+  echo -e "\tFeel free to use either in subsequent analyses, but be aware of the differences."
+  echo -e "\tIf the CDS were identical, but the proteins were not, then it may be due to the way gffread extracts the protein sequences from the GTF."
+fi
+
+
+echo "DONE"
+echo -e ""
+echo -e "\nThe updated transcriptome GTF with CDS is:\n\t${BASE}.WITH-CDS.gtf\n"
+echo -e "There are also useful intermediate files, such as:"
+echo -e "\tTranscript sequences:\n\t\t${TRANS_FA}"
+echo -e "\tProtein sequences:\n\t\t${BASEDIR}.peptides.fasta"
+echo -e "\tCDS sequences:\n\t\t${BASEDIR}.Borf-CDS.fasta"
+echo -e "\tCDS BED file:\n\t\t${BASEDIR}.CDS-on-genome.bed"
+echo -e "\t...and others that may be of interest, such as:\n\t\ttranscript lengths, peptide lengths, CDS lengths, and more.\n"
+
+## Brief what to do next
+what_next | awk '{sub("\t",""); print}'
+
+
+############################################################################################
+############################################################################################
+############################################################################################
+############################################################################################
+## QC STEP:#################################################################################
+############################################################################################
+############################################################################################
+############################################################################################
+
+
+
+
+exit 0 
+
+echo -e "\nDone with CDS comparison. Check ${BASE}.CDS-comparison.txt for results."
+
+
+## THIS CODE DOESNT REALLY MAKE SENSE WITH THE FULL GTF EXTRACTIONS -- CAN MOVE TO UTILITIES LATER
+echo -e "\nDo CDS comparison"
+## CHECK
+( for i in {1..24} ; do
+    awk -v "N=${i}" 'NR==N' ${BASEDIR}.Borf-CDS.fasta ;
+    awk -v "N=${i}" 'NR==N' ${BASEDIR}.extracted-CDS-only.fasta ;
+    R=$( echo $i | awk '{ print $1%2}' )
+    if [ ${R} -eq 0 ] ; then
+      ${MD5SUM} <( awk -v "N=${i}" 'NR==N' ${BASEDIR}.Borf-CDS.fasta ) <( awk -v "N=${i}" 'NR==N' ${BASEDIR}.extracted-CDS-only.fasta ) ;
+      echo
+    fi
+  done 
+) > ${BASE}.CDS-comparison.txt 2>&1
+
+
+
+
+
+
+
+
+
+## EXAMPLE GTF ENTRIES:
+
+## Stringtie:
+## IV      StringTie       transcript      59048441        59048841        1000    +       .       gene_id "STRG.10313"; transcript_id "STRG.10313.1";
+## IV      StringTie       exon    59048441        59048532        1000    +       .       gene_id "STRG.10313"; transcript_id "STRG.10313.1"; exon_number "1"; 
+## IV      StringTie       exon    59048591        59048841        1000    +       .       gene_id "STRG.10313"; transcript_id "STRG.10313.1"; exon_number "2"; 
+## Need to pull out based on transcript_id, not gene_id.
+## 
+
+## PsiClass:
+# scaffold_1      PsiCLASS        transcript      32582   41180   1000    -       .       gene_id "scaffold_1.54"; transcript_id "scaffold_1.54.0"; FPKM "0.199033"; TPM "0.409969"; cov "7.792208"; sample_cnt "1";
+# scaffold_1      PsiCLASS        exon    32582   32775   1000    -       .       gene_id "scaffold_1.54"; transcript_id "scaffold_1.54.0"; exon_number "1"; FPKM "0.199033"; TPM "0.409969"; cov "7.792208"; sample_cnt "1";
+# scaffold_1      PsiCLASS        exon    33030   33125   1000    -       .       gene_id "scaffold_1.54"; transcript_id "scaffold_1.54.0"; exon_number "2"; FPKM "0.199033"; TPM "0.409969"; cov "7.792208"; sample_cnt "1";
+# scaffold_1      PsiCLASS        exon    33214   33271   1000    -       .       gene_id "scaffold_1.54"; transcript_id "scaffold_1.54.0"; exon_number "3"; FPKM "0.199033"; TPM "0.409969"; cov "7.792208"; sample_cnt "1";
+# scaffold_1      PsiCLASS        exon    33358   33444   1000    -       .       gene_id "scaffold_1.54"; transcript_id "scaffold_1.54.0"; exon_number "4"; FPKM "0.199033"; TPM "0.409969"; cov "7.792208"; sample_cnt "1";
+# scaffold_1      PsiCLASS        exon    40285   40404   1000    -       .       gene_id "scaffold_1.54"; transcript_id "scaffold_1.54.0"; exon_number "5"; FPKM "0.199033"; TPM "0.409969"; cov "7.792208"; sample_cnt "1";
+# scaffold_1      PsiCLASS        exon    41120   41180   1000    -       .       gene_id "scaffold_1.54"; transcript_id "scaffold_1.54.0"; exon_number "6"; FPKM "0.199033"; TPM "0.409969"; cov "7.792208"; sample_cnt "1";
+
+## Gene with multiple transcripts:
+# IV	StringTie	transcript	59090051	59090489	1000	-	.	gene_id "STRG.10967"; transcript_id "STRG.10967.1"; cov "23.873514"; FPKM "12.068003"; TPM "9.669335";
+# IV	StringTie	exon	59090051	59090342	1000	-	.	gene_id "STRG.10967"; transcript_id "STRG.10967.1"; exon_number "1"; cov "23.184189";
+# IV	StringTie	exon	59090406	59090489	1000	-	.	gene_id "STRG.10967"; transcript_id "STRG.10967.1"; exon_number "2"; cov "26.269741";
+# IV	StringTie	transcript	59090051	59093826	1000	-	.	gene_id "STRG.10967"; transcript_id "STRG.10967.2"; cov "5.402986"; FPKM "2.731196"; TPM "2.188337";
+# IV	StringTie	exon	59090051	59090342	1000	-	.	gene_id "STRG.10967"; transcript_id "STRG.10967.2"; exon_number "1"; cov "5.207395";
+# IV	StringTie	exon	59093727	59093826	1000	-	.	gene_id "STRG.10967"; transcript_id "STRG.10967.2"; exon_number "2"; cov "5.974113";
+# IV	StringTie	transcript	59093371	59093826	1000	-	.	gene_id "STRG.10967"; transcript_id "STRG.10967.3"; cov "24.786339"; FPKM "12.529433"; TPM "10.039051";
+# IV	StringTie	exon	59093371	59093663	1000	-	.	gene_id "STRG.10967"; transcript_id "STRG.10967.3"; exon_number "1"; cov "23.969713";
+# IV		StringTie	exon	59093727	59093826	1000	-	.	gene_id "STRG.10967"; transcript_id "STRG.10967.3"; exon_number "2"; cov "27.179050";
+# IV	StringTie	transcript	59093371	59095398	1000	-	.	gene_id "STRG.10967"; transcript_id "STRG.10967.4"; cov "6.069007"; FPKM "3.067868"; TPM "2.458091";
+# IV	StringTie	exon	59093371	59093663	1000	-	.	gene_id "STRG.10967"; transcript_id "STRG.10967.4"; exon_number "1"; cov "5.618499";
+# IV	StringTie	exon	59095370	59095398	1000	-	.	gene_id "STRG.10967"; transcript_id "STRG.10967.4"; exon_number "2"; cov "10.620689";
+
+## Example of entry after adding CDS:
+# IV	StringTie	transcript	59048441	59048841	1000	+	.	gene_id "STRG.10313"; transcript_id "STRG.10313.1"; cov "4171.491211"; FPKM "1994.949463"; TPM "2366.334961"; Source_file "batch-RNA-8x4-rep1.gtf"; Allans_nickname "gene-95"; Puff_locus_nickname "IV/12-1";
+# IV	StringTie	exon	59048441	59048532	1000	+	.	gene_id "STRG.10313"; transcript_id "STRG.10313.1"; exon_number "1"; cov "5389.875977"; Source_file "batch-RNA-8x4-rep1.gtf"; Allans_nickname "gene-95"; Puff_locus_nickname "IV/12-1";
+# IV	StringTie	CDS	59048482	59048532	1000	+	0	gene_id "STRG.10313"; transcript_id "STRG.10313.1"; exon_number "1"; cov "5389.875977"; Source_file "batch-RNA-8x4-rep1.gtf"; Allans_nickname "gene-95"; Puff_locus_nickname "IV/12-1";
+# IV	StringTie	exon	59048591	59048841	1000	+	.	gene_id "STRG.10313"; transcript_id "STRG.10313.1"; exon_number "2"; cov "3724.912109"; Source_file "batch-RNA-8x4-rep1.gtf"; Allans_nickname "gene-95"; Puff_locus_nickname "IV/12-1";
+# IV	StringTie	CDS	59048591	59048758	1000	+	0	gene_id "STRG.10313"; transcript_id "STRG.10313.1"; exon_number "2"; cov "3724.912109"; Source_file "batch-RNA-8x4-rep1.gtf"; Allans_nickname "gene-95"; Puff_locus_nickname "IV/12-1";
+
+## Other example with CDS (note exon re-numbering happened here, but dont want that in future):
+# IV	StringTie	exon	59093371	59093663	1000	-	.	gene_id "STRG.10967"; transcript_id "STRG.10967.3"; exon_number "2"; cov "23.969713"; Source_file "batch-RNA-EEDJ-rep2.gtf"; Allans_nickname "gene-140"; Puff_locus_nickname "IV/12-11"; 
+# IV	StringTie	transcript	59093371	59093826	1000	-	.	gene_id "STRG.10967"; transcript_id "STRG.10967.3"; cov "24.786339"; FPKM "12.529433"; TPM "10.039051"; Source_file "batch-RNA-EEDJ-rep2.gtf"; Allans_nickname "gene-140"; Puff_locus_nickname "IV/12-11";
+# IV	StringTie	CDS	59093493	59093663	1000	-	0	gene_id "STRG.10967"; transcript_id "STRG.10967.3"; exon_number "2"; cov "23.969713"; Source_file "batch-RNA-EEDJ-rep2.gtf"; Allans_nickname "gene-140"; Puff_locus_nickname "IV/12-11";
+# IV	StringTie	CDS	59093727	59093777	1000	-	0	gene_id "STRG.10967"; transcript_id "STRG.10967.3"; exon_number "1"; cov "27.179050"; Source_file "batch-RNA-EEDJ-rep2.gtf"; Allans_nickname "gene-140"; Puff_locus_nickname "IV/12-11"; "Alt_cds_start_calc" 59093778";
+# IV	StringTie	exon	59093727	59093826	1000	-	.	gene_id "STRG.10967"; transcript_id "STRG.10967.3"; exon_number "1"; cov "27.179050"; Source_file "batch-RNA-EEDJ-rep2.gtf"; Allans_nickname "gene-140"; Puff_locus_nickname "IV/12-11";
+
+
+
+
