@@ -1,13 +1,11 @@
-# addCDStoTransGTF
-returns a CDS-updated transcriptome GTF:: quickly annotate your transcriptome assembly GTF with coding sequence (CDS) coordinates corresponding to protein sequences predicted from the transcripts.
-
-
 ![logo](/img/logo.png)
 
+# addCDStoTransGTF
+Returns a CDS-updated transcriptome GTF:: quickly annotate your transcriptome assembly GTF with coding sequence (CDS) coordinates corresponding to protein sequences predicted from the transcripts.
 
 
 
-	Usage: ../addCDStoTransGTF <gtf_file> <min_valid_orf_length> <genome_fasta>
+	Usage: addCDStoTransGTF <gtf_file> <min_valid_orf_length> <genome_fasta>
 
 		<gtf_file>:		This is an input GTF file of a transcriptome from StringTie, PsiClass, or other.
 					It assumes column 3 contains the feature type (e.g. 'transcript' and 'exon').
@@ -23,7 +21,7 @@ returns a CDS-updated transcriptome GTF:: quickly annotate your transcriptome as
 		<genome_fasta>:		The genome FASTA file that corresponds to the GTF.
 
 	Example Usage: 
-		../addCDStoTransGTF my-transcriptome.gtf 40 my-genome.fasta
+		addCDStoTransGTF my-transcriptome.gtf 40 my-genome.fasta
 
 	GTF Support:
 		addCDStoTransGTF supports any transcriptome GTF where transcript_id = gene_id.k where k is the transcript number.
