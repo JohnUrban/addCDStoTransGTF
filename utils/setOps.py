@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 
+########################################################################################################################
+###### COPIED FROM SCIARATOOLS ON 2025-July-11: https://github.com/JohnUrban/sciaratools2
+###### THIS VERSION IS FOSSILIZED ; FURTHER DEVELOPMENT, IF ANY, CAN BE FOUND THERE.
+########################################################################################################################
+
 import sys, argparse
 from collections import defaultdict
 
