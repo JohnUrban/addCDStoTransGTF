@@ -37,7 +37,7 @@ conda env create -f addCDStoTransGTF-deps.MacOS-M4max.with-bedtools.yml
 
 
 
-
+## Usage:
 
 	Usage: addCDStoTransGTF <gtf_file> <min_valid_orf_length> <genome_fasta>
 
