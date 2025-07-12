@@ -3,7 +3,7 @@
 # addCDStoTransGTF
 Returns a CDS-updated transcriptome GTF:: quickly annotate your transcriptome assembly GTF with coding sequence (CDS) coordinates corresponding to protein sequences predicted from the transcripts.
 
-# Quick Install
+## Quick Install
 ```
 ## Clone it
 git clone https://github.com/JohnUrban/addCDStoTransGTF.git
