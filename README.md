@@ -3,6 +3,40 @@
 # addCDStoTransGTF
 Returns a CDS-updated transcriptome GTF:: quickly annotate your transcriptome assembly GTF with coding sequence (CDS) coordinates corresponding to protein sequences predicted from the transcripts.
 
+# Quick Install
+```
+## Clone it
+git clone https://github.com/JohnUrban/addCDStoTransGTF.git
+
+## Add to PATH
+SCRIPTDIR=${PWD}/addCDStoTransGTF
+export PATH=${SCRIPTDIR}/:${SCRIPTDIR}/utils:${PATH}
+
+## Check it out
+addCDStoTransGTF
+
+
+## Will need all dependencies installed to successfully use.
+```
+
+## Quick Install of Dependencies Using Conda.
+```
+## Using conda create:
+conda create -n addCDStoTransGTF-deps python=3.10.4 bioconda::ucsc-fasize bioconda::borf bioconda::gffread bioconda::gff3sort bioconda::bedtools=2.31 -y
+conda activate addCDStoTransGTF-deps
+
+## Sometimes that fails. If so, using a provided YML file is often the solutions:
+cd conda-deps
+
+## If on Linux, try:
+conda env create -f addCDStoTransGTF-deps.linux.with-bedtools.yml
+
+## If on Mac, try:
+conda env create -f addCDStoTransGTF-deps.MacOS-M4max.with-bedtools.yml
+```
+
+
+
 
 
 	Usage: addCDStoTransGTF <gtf_file> <min_valid_orf_length> <genome_fasta>
